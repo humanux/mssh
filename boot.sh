@@ -9,7 +9,6 @@ IMG_PATH=/mnt/linux
 IMG_NAME=RHEL-Server-7.0-64-virtio.qcow2
 DISK_IMG=$IMG_PATH/$IMG_NAME
 #DISK_IMG=$ROOT_PATH/win8-64-virtio.qcow2
-#ISO_IMG=/root/staf-kvm-devel/autotest-devel/client/tests/kvm/isos/windows/winutils.iso
 ISO_IMG=/root/virtio-win.iso
 NET_SCRIPT=$ROOT_PATH/qemu-ifup-switch
 
