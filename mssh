@@ -1,0 +1,211 @@
+#!/bin/bash
+if [ -e /sys/class/net/tun0 ]
+then
+    INTERFACE="tun0"
+fi
+
+LOCAL_ADDR=$( ifconfig ${INTERFACE:="em1"} | sed -n "s/.*inet \(.*\) netmask.*/\1/p" | sed 's/ *$//g' )
+BASH_DIR="/home/yunzheng/test-qemu"
+PASSWORD=redhat
+HOST_NAME=$1
+LOCAL_DIR=/home/yunzheng
+LOCAL_AUTOTEST_DIR=$LOCAL_DIR/autotest
+LOCAL_VIRT_DIR=$LOCAL_AUTOTEST_DIR/client/tests/virt
+REMOTE_DIR=/root
+REMOTE_AUTOTEST_DIR=$REMOTE_DIR/autotest
+REMOTE_VIRT_DIR=$REMOTE_AUTOTEST_DIR/client/tests/virt
+
+ENV_ROOT_PATH=/home/kvm_autotest_root
+ISO_PATH=$ENV_ROOT_PATH/iso
+IMG_PATH=$ENV_ROOT_PATH/images
+NFS_ADDR=10.66.90.128
+NFS_BASE_PATH=/vol/S2/kvmauto
+WIN_IMG_PATH=$NFS_ADDR:$NFS_BASE_PATH/windows_img
+LUX_IMG_PATH=$NFS_ADDR:$NFS_BASE_PATH/linux_img
+ISO_IMG_PATH=$NFS_ADDR:$NFS_BASE_PATH/iso
+
+
+
+
+function start_git_daemon()
+{
+    stop_git_daemon
+    git daemon --base-path=$1 --export-all &
+}
+
+function stop_git_daemon()
+{
+    pidof git-daemon && killall -9 git-daemon 2>&1 >/dev/null
+}
+
+function remote_run_cmd()
+{
+    ssh root@$HOST_NAME "$@"
+}
+
+function do_remote_result_mount()
+{
+  remote_mount_point=/root/autotest/client/results/default
+  local_mount_point=result_$HOST_NAME
+  grep $local_mount_point /proc/mounts && sudo umount -f $local_mount_point
+  [ -e $local_mount_point ] || mkdir -p $local_mount_point
+  sudo mount $HOST_NAME:$remote_mount_point $local_mount_point
+}
+
+function start_nfs_remote()
+{
+    remote_run_cmd "rpm -qa | grep nfs-utils || yum -y install nfs-utils"
+    remote_run_cmd "exports | grep $REMOTE_AUTOTEST_DIR || echo $REMOTE_AUTOTEST_DIR *\(ro,sync,no_root_squash\) > /etc/exports"
+    remote_run_cmd "pidof nfsd || service rpcbind start;"
+    remote_run_cmd "service nfsd start || ervice nfs-server start; service nfs-idmap start"
+    remote_run_cmd "setenfore 0; iptables -F"
+}
+
+function clone_autotest()
+{
+    remote_run_cmd  "[ -e $REMOTE_AUTOTEST_DIR ] || git clone git://$LOCAL_ADDR/autotest "
+}
+
+function virttest_clean()
+{ 
+    remote_run_cmd "[ -e $REMOTE_VIRT_DIR ] && rm -rf $REMOTE_VIRT_DIR"
+}
+
+function clone_virttest()
+{   
+   virttest_clean
+   remote_run_cmd  "cd /root; git clone git://$LOCAL_ADDR/virt "
+   remote_run_cmd " [ -e /root/virt ] && mv /root/virt $REMOTE_AUTOTEST_DIR/client/tests"
+}
+
+function remote_env_preprocess()
+{
+  r_cmd="[ -e $LOCAL_ISO_PATH ] || mkdir -p $LOCAL_ISO_PATH;"
+  r_cmd+="[ -e $LOCAL_IMG_PATH ] || mkdir -p $LOCAL_IMG_PATH;"
+  r_cmd+="[ -e /mnt/windows ] || mkdir /mnt/windows;"
+  r_cmd+="[ -e /mnt/linux ] || mkdir /mnt/linux;"
+
+  r_cmd+="grep \"$ISO_IMG_PATH $LOCAL_ISO_PATH\" /proc/mounts  2>&1 > /dev/null  ||"
+  r_cmd+=" mount $ISO_IMG_PATH $LOCAL_ISO_PATH"
+  r_cmd+="grep \"$WIN_IMG_PATH /mnt/windows\" /proc/mounts  2>&1 > /dev/null || "
+  r_cmd+="  mount $WIN_IMG_PATH /mnt/windows"
+  r_cmd+="grep \"$LUX_IMG_PATH /mnt/linux\" /proc/mounts 2>&1 > /dev/null || "
+  r_cmd+="    mount $LUX_IMG_PATH  /mnt/linux"
+  remote_run_cmd $r_cmd
+}
+
+function env_setup()
+{
+    remote_env_preprocess
+    remote_run_cmd "[ -e /usr/libexec/qemu_kvm ] || yum -y install qemu-kvm"
+    remote_run_cmd "[ -e $REMOTE_VIRT_DIR/qemu/qemu ] || \
+                    ln -s /usr/libexec/qemu-kvm \
+                    $REMOTE_VIRT_DIR/qemu/qemu"
+}
+
+function killall_python()
+{
+     remote_run_cmd "killall python 2>&1 > /dev/null; killall /usr/bin/python 2>&1 >/dev/null;"
+}
+
+function clean_test_env()
+{
+     remote_run_cmd "rm -rf $REMOTE_VIRT_DIR/qemu/env;"
+}
+
+function run_autotest_remote()
+{
+    #killall_python
+    scp $LOCAL_VIRT_DIR/tests.cfg \
+        root@$HOST_NAME:$REMOTE_VIRT_DIR/qemu/cfg/tests-example.cfg
+    remote_run_cmd "cd $REMOTE_VIRT_DIR;
+                    python ../../autotest qemu/control.kernel-version --verbose"
+}
+
+grep "$HOST_NAME"  /home/yunzheng/.ssh/known_hosts >/dev/null
+if [ "$?" != '0' ] 
+then
+    ssh root@$HOST_NAME "if [ ! -e /root/.ssh ]; then mkdir /root/.ssh; fi;" >/dev/null
+    scp  ~/.ssh/id_rsa.pub root@$1:/root/.ssh/authorized_keys >/dev/null
+fi
+
+if [ $# -ge 2 ]
+then
+    case $2 in
+      T )
+          start_git_daemon "$LOCAL_DIR";
+          clone_autotest;
+          clone_virttest;
+          env_setup;
+          killall_python;
+          run_autotest_remote;
+          stop_git_daemon;;
+      t )
+          if [ $# -gt 2 ]; then \
+              shift; shift;
+              for file in $@ ; \
+                  do scp ~/virt/$file root@$HOST_NAME:$REMOTE_VIRT_DIR/$file 2>&1 > /dev/null;\
+              done;
+          fi
+          do_remote_result_mount;
+          run_autotest_remote;;
+      kt )
+          killall_python;
+          clean_test_env;
+          do_remote_result_mount;
+          run_autotest_remote;;
+      gt )
+          for file in $(git st | sed  -n 's/.*modified:\ \+\(.*\)/\1/p')
+          do
+              scp ~/virt/$file root@$HOST_NAME:$REMOTE_VIRT_DIR/$file 2>&1 > /dev/null;\
+          done
+          do_remote_result_mount;
+          run_autotest_remote;;
+      k )
+          killall_python;;
+      c )
+          clean_test_env;;
+      u )
+        sed -i "/$HOST_NAME/d" /home/yunzheng/.ssh/known_hosts >/dev/null;
+        ssh root@$HOST_NAME "if [ ! -e /root/.ssh ]; then mkdir /root/.ssh; fi;" >/dev/null
+        scp  ~/.ssh/id_rsa.pub root@$1:/root/.ssh/authorized_keys >/dev/null;
+        ssh -X root@$HOST_NAME "$CMD"
+        shift;;
+      s )
+       scp $BASH_DIR/autotest_set.sh root@$HOST_NAME:/root/ > /dev/null;
+       ssh -X root@$HOST_NAME "$CMD"
+       shift;;
+      g )
+       scp /home/yunzheng/.gitconfig root@$HOST_NAME:/root/ > /dev/null;
+       ssh -X root@$HOST_NAME "$CMD"
+       shift;;
+      cp )
+          shift; shift;
+          scp $@ root@$HOST_NAME:/root/;;
+      e )
+       scp $BASH_DIR/get_version.sh root@$HOST_NAME:/root/ > /dev/null;
+       ssh -X root@$HOST_NAME "$CMD"
+       shift;;
+      v )
+        shift; shift;
+        vmview  $HOST_NAME $@;;
+      x )
+        shift; shift;
+        ssh -X root@$HOST_NAME;;
+
+      a )
+       scp $BASH_DIR/*.sh root@$HOST_NAME:/root/ > /dev/null;
+       ssh -X root@$HOST_NAME "$CMD"
+       shift;;
+      m )
+       ssh root@$HOST_NAME "mkdir /root/qemu_kvm; mount 10.66.11.219:/home/yunzheng/qemu_kvm qemu_kvm";
+       ssh -X root@$HOST_NAME "$CMD"
+       shift;;
+      * )
+       CMD=$2;
+       ssh -X root@$HOST_NAME "$CMD"
+       shift;;
+    esac
+else
+    ssh  root@$HOST_NAME "$CMD"
+fi
